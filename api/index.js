@@ -204,16 +204,25 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  // ЛОГИРОВАНИЕ: смотрим, что реально приходит
+  console.log("=== INCOMING REQUEST BODY ===");
+  console.log(JSON.stringify(req.body, null, 2));
+  console.log("=== HEADERS ===");
+  console.log(JSON.stringify(req.headers, null, 2));
+
   const startedAt = Date.now();
   const remainingMs = () => TOTAL_RESPONSE_BUDGET_MS - (Date.now() - startedAt);
   const body = req.body && typeof req.body === "object" ? req.body : {};
-  const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
+  
+  // Универсальный поиск истории во всех возможных местах
   const oldHistory = safeHistory(
-  body?.state?.session?.history || 
-  body?.session?.state?.history || 
-  body?.session_state?.history || 
-  []
-);
+    body?.state?.session?.history || 
+    body?.session?.state?.history || 
+    body?.session_state?.history || 
+    []
+  );
+  
+  const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
 
   if (!text) {
     return res.status(200).json(aliceResponse(
@@ -226,7 +235,6 @@ export default async function handler(req, res) {
   try {
     let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
-      // Search has a very short budget because Alice expects a response within 4.5 seconds.
       searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2600)));
     }
 
