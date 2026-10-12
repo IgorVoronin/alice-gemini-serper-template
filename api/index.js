@@ -1,6 +1,7 @@
-const DEFAULT_MODEL = "gemini-3.5-flash-lite";
-const MAX_HISTORY_MESSAGES = 8;
-const MAX_HISTORY_MESSAGE_CHARS = 1200;
+// УМЕНЬШАЕМ лимиты, чтобы уложиться в 1 КБ лимита Яндекса для session_state
+const DEFAULT_MODEL = "gemini-2.0-flash"; // Более стабильная модель
+const MAX_HISTORY_MESSAGES = 3; // Только 3 последних сообщения
+const MAX_HISTORY_MESSAGE_CHARS = 150; // Короткие выдержки
 const MAX_ALICE_TEXT = 1024;
 const TOTAL_RESPONSE_BUDGET_MS = 3600;
 const SERPER_TIMEOUT_MS = 600;
@@ -21,6 +22,7 @@ function aliceResponse(text, endSession = false, history = []) {
       text: fitAliceText(text),
       end_session: endSession
     },
+    // Яндекс сохранит этот объект. Он должен быть меньше 1 КБ!
     session_state: { history }
   };
 }
@@ -102,7 +104,7 @@ async function searchWeb(query, timeoutMs) {
       });
 
     const answerBox = data.answerBox?.answer || data.answerBox?.snippet;
-    if (answerBox) items.unshift(`Краткий ответ поисковика: ${String(answerBox).slice(0, 350)}`);
+    if (answerBox) items.unshift(`Краткий ответ: ${String(answerBox).slice(0, 350)}`);
     return items.length ? items.join("\n") : "";
   } catch (error) {
     console.warn("Serper request did not finish in time; continuing without search.");
@@ -119,14 +121,17 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   if (!/^[A-Za-z0-9._-]+$/.test(model)) throw new Error("INVALID_MODEL_NAME");
 
   const contents = safeHistory(history).map(item => ({
-    role: item.role,
+    role: item.role === "user" ? "user" : "model",
     parts: [{ text: item.text }]
   }));
 
   const prompt = searchContext
-    ? `${text}\n\nРезультаты поиска в интернете:\n${searchContext}\nИспользуй их только там, где они относятся к вопросу.`
+    ? `${text}\n\nКонтекст поиска:\n${searchContext}\nИспользуй эти данные для ответа.`
     : text;
-  contents.push({ role: "user", parts: [{ text: prompt }] });
+    
+  if (prompt.trim()) {
+    contents.push({ role: "user", parts: [{ text: prompt }] });
+  }
 
   const { response, data } = await fetchJson(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -166,37 +171,24 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     if (data?.promptFeedback?.blockReason) throw new Error("GEMINI_BLOCKED");
     throw new Error("GEMINI_EMPTY_RESPONSE");
   }
-  if (candidate?.finishReason === "MAX_TOKENS") {
-    console.warn("Gemini reached the output token limit.");
-  }
   return answer;
 }
 
 function errorForUser(error) {
   switch (error?.message) {
-    case "MISSING_GEMINI_KEY":
-      return "Сервер пока не настроен. Проверьте переменную GEMINI_API_KEY в настройках Vercel.";
-    case "GEMINI_KEY_REJECTED":
-      return "Не удалось подключиться к Gemini. Проверьте API-ключ в настройках Vercel.";
-    case "GEMINI_QUOTA":
-      return "Сейчас превышен лимит запросов к Gemini. Попробуйте немного позже.";
-    case "GEMINI_BLOCKED":
-      return "Я не смогла обработать этот запрос. Попробуйте спросить иначе.";
+    case "MISSING_GEMINI_KEY": return "Сервер не настроен. Проверьте GEMINI_API_KEY.";
+    case "GEMINI_KEY_REJECTED": return "Ошибка ключа Gemini. Проверьте настройки Vercel.";
+    case "GEMINI_QUOTA": return "Превышен лимит запросов к Gemini. Попробуйте позже.";
+    case "GEMINI_BLOCKED": return "Я не смогла обработать этот запрос. Попробуйте спросить иначе.";
     case "TIME_BUDGET_EXHAUSTED":
-    case "AbortError":
-      return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз, чуть короче.";
-    default:
-      return "Не получилось получить ответ от нейросети. Попробуйте ещё раз чуть позже.";
+    case "AbortError": return "Не успела подготовить ответ. Попробуйте задать вопрос короче.";
+    default: return "Не получилось получить ответ. Попробуйте ещё раз.";
   }
 }
 
 export default async function handler(req, res) {
   if (req.method === "GET") {
-    return res.status(200).json({
-      ok: true,
-      service: "alice-gemini-serper",
-      message: "Webhook is ready. Yandex Dialogs should send POST requests to /api."
-    });
+    return res.status(200).json({ ok: true, service: "alice-gemini-serper", message: "Ready" });
   }
 
   if (req.method !== "POST") {
@@ -204,32 +196,18 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // ЛОГИРОВАНИЕ: смотрим, что реально приходит
-  console.log("=== INCOMING REQUEST BODY ===");
-  console.log(JSON.stringify(req.body, null, 2));
-  console.log("=== HEADERS ===");
-  console.log(JSON.stringify(req.headers, null, 2));
-
   const startedAt = Date.now();
   const remainingMs = () => TOTAL_RESPONSE_BUDGET_MS - (Date.now() - startedAt);
   const body = req.body && typeof req.body === "object" ? req.body : {};
   
-  // Универсальный поиск истории во всех возможных местах
-  const oldHistory = safeHistory(
-    body?.state?.session?.history || 
-    body?.session?.state?.history || 
-    body?.session_state?.history || 
-    []
-  );
+  // ИСПРАВЛЕНИЕ: Читаем историю из body.state.session.value.history (структура Яндекса)
+  const sessionValue = body?.state?.session?.value || {};
+  const oldHistory = safeHistory(sessionValue.history || []);
   
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
 
   if (!text) {
-    return res.status(200).json(aliceResponse(
-      "Привет! Я могу ответить на вопрос или найти актуальную информацию. Что хочешь узнать?",
-      false,
-      oldHistory
-    ));
+    return res.status(200).json(aliceResponse("Привет! Я готов помочь. Что хочешь узнать?", false, oldHistory));
   }
 
   try {
@@ -254,7 +232,7 @@ export default async function handler(req, res) {
     return res.status(200).json(aliceResponse(answer, false, history));
   } catch (error) {
     const safeError = error?.message === "AbortError" ? "TIME_BUDGET_EXHAUSTED" : error;
-    console.warn("Alice webhook returned a fallback response:", safeError?.message || "unknown error");
+    console.warn("Alice webhook fallback:", safeError?.message || "unknown error");
     return res.status(200).json(aliceResponse(errorForUser(safeError), false, oldHistory));
   }
 }
