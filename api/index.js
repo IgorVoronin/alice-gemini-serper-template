@@ -208,7 +208,12 @@ export default async function handler(req, res) {
   const remainingMs = () => TOTAL_RESPONSE_BUDGET_MS - (Date.now() - startedAt);
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
-  const oldHistory = safeHistory(body?.state?.session?.history);
+  const oldHistory = safeHistory(
+  body?.state?.session?.history || 
+  body?.session?.state?.history || 
+  body?.session_state?.history || 
+  []
+);
 
   if (!text) {
     return res.status(200).json(aliceResponse(
