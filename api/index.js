@@ -153,7 +153,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     console.error("Gemini request failed with HTTP", status);
     if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
     if (status === 429) throw new Error("GEMINI_QUOTA");
-    throw new Error("GEMINI_REQUEST_FAILED");
+    throw new Error(`GEMINI_HTTP_${status}`);
   }
 
   const candidate = data?.candidates?.[0];
