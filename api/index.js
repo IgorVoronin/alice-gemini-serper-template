@@ -21,7 +21,7 @@ function aliceResponse(text, endSession = false, history = []) {
       text: fitAliceText(text),
       end_session: endSession
     },
-    session_state: { history }
+    session_state: { history: history }
   };
 }
 
@@ -208,7 +208,7 @@ export default async function handler(req, res) {
   const remainingMs = () => TOTAL_RESPONSE_BUDGET_MS - (Date.now() - startedAt);
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
-  const oldHistory = safeHistory(body?.state?.session?.value?.history);
+  const oldHistory = safeHistory(body?.state?.session?.history);
 
   if (!text) {
     return res.status(200).json(aliceResponse(
