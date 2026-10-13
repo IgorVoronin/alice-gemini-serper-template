@@ -1,4 +1,4 @@
-const DEFAULT_MODEL = "gemini-2.0-flash";
+const DEFAULT_MODEL = "gemini-3.8-flash";
 const MAX_HISTORY_MESSAGES = 4;
 const MAX_HISTORY_MESSAGE_CHARS = 120;
 const MAX_ALICE_TEXT = 1000;
@@ -114,7 +114,6 @@ async function askGemini(text, history, searchContext) {
 
   const model = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
 
-  // Gemini строго требует чередование user -> model и старт с user
   const contents = [];
   let lastRole = null;
   for (const item of safeHistory(history)) {
@@ -132,51 +131,60 @@ async function askGemini(text, history, searchContext) {
     ? `${text}\n\nРезультаты поиска в интернете:\n${searchContext}`
     : text;
 
-  // Если последнее сообщение в истории уже было user, склеиваем, иначе пушим
   if (contents.length > 0 && contents[contents.length - 1].role === "user") {
     contents[contents.length - 1].parts[0].text += `\n${prompt}`;
   } else {
     contents.push({ role: "user", parts: [{ text: prompt }] });
   }
 
-  const { response, data } = await fetchJson(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": key
-      },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents,
-        generationConfig: {
-          temperature: 0.6,
-          maxOutputTokens: 200
-        }
-      })
+  const payload = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": key
     },
-    3800
-  );
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents,
+      generationConfig: {
+        temperature: 0.6,
+        maxOutputTokens: 200
+      }
+    })
+  };
 
-  if (!response.ok) {
-    const status = Number(response.status);
-    if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
-    if (status === 429) throw new Error("GEMINI_QUOTA");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
+  // Делаем до 3 повторных попыток при high demand / 503
+  let lastErrorMsg = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const { response, data } = await fetchJson(url, payload, 3200);
+
+    if (response && response.ok) {
+      const answer = (data?.candidates?.[0]?.content?.parts || [])
+        .map(p => typeof p.text === "string" ? p.text : "")
+        .join("")
+        .trim();
+      if (answer) return answer;
+    }
+
+    const status = Number(response?.status || 0);
     const errMsg = data?.error?.message || `HTTP_${status}`;
-    throw new Error(`GEMINI_ERROR_${errMsg}`);
+    lastErrorMsg = errMsg;
+
+    const isTemporary = errMsg.includes("high demand") || status === 503 || status === 429;
+    if (!isTemporary) {
+      if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
+      throw new Error(`GEMINI_ERROR_${errMsg}`);
+    }
+
+    if (attempt < 3) {
+      await new Promise(r => setTimeout(r, attempt * 400));
+    }
   }
 
-  const candidate = data?.candidates?.[0];
-  const answer = (candidate?.content?.parts || [])
-    .map(part => typeof part.text === "string" ? part.text : "")
-    .join("")
-    .trim();
-
-  if (!answer) throw new Error("GEMINI_EMPTY_RESPONSE");
-  return answer;
+  throw new Error(`GEMINI_ERROR_${lastErrorMsg}`);
 }
-
 function errorForUser(error) {
   const msg = error?.message || "";
   if (msg === "MISSING_GEMINI_KEY") return "Сервер не настроен. Проверьте переменную GEMINI_API_KEY в Vercel.";
