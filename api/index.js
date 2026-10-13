@@ -186,7 +186,7 @@ function errorForUser(error) {
     case "AbortError":
       return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз, чуть короче.";
     default:
-      return "Не получилось получить ответ от нейросети. Попробуйте ещё раз чуть позже.";
+      return `Ошибка Gemini: ${error?.message || "неизвестно"}`;
   }
 }
 
